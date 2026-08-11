@@ -27,7 +27,7 @@ predicates = "3"
 socket2.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
 xmltree.workspace = true
 
 [lints]

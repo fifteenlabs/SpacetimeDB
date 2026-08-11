@@ -37,7 +37,7 @@ futures = "0.3"
 bytes = "1"
 tracing.workspace = true
 bytestring = "1"
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
 derive_more = "0.99.17"
 uuid.workspace = true
 jsonwebtoken.workspace = true
