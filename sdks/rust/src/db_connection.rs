@@ -369,6 +369,27 @@ impl<M: SpacetimeModule> DbContextImpl<M> {
         Ok(())
     }
 
+    /// Hand a message to the WebSocket sender loop.
+    ///
+    /// A failed send means the loop has exited because the socket died, before
+    /// the closed incoming channel could reach `advance_*`. That is a disconnect,
+    /// and is reported through `end_connection` like any other.
+    ///
+    /// Must not be called with `self.inner` locked: `end_connection` takes it.
+    fn send_ws_message(&self, msg: ws::v2::ClientMessage) -> crate::Result<()> {
+        let sent = self
+            .send_chan
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or(crate::Error::Disconnected)?
+            .unbounded_send(msg);
+        match sent {
+            Ok(()) => Ok(()),
+            Err(_) => Err(self.end_connection(None)),
+        }
+    }
+
     /// Apply an individual [`PendingMutation`].
     fn apply_mutation(&self, mutation: PendingMutation<M>) -> crate::Result<()> {
         self.debug_log(|out| writeln!(out, "`apply_mutation`: {mutation:?}"));
@@ -376,24 +397,26 @@ impl<M: SpacetimeModule> DbContextImpl<M> {
             // Subscribe: register the subscription in the [`SubscriptionManager`]
             // and send the `Subscribe` WS message.
             PendingMutation::Subscribe { query_set_id, handle } => {
-                let mut inner = self.inner.lock().unwrap();
                 // Register the subscription, so we can handle related messages from the server.
-                inner.subscriptions.register_subscription(query_set_id, handle.clone());
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .subscriptions
+                    .register_subscription(query_set_id, handle.clone());
                 if let Some(msg) = handle.start() {
-                    self.send_chan
-                        .lock()
-                        .unwrap()
-                        .as_mut()
-                        .ok_or(crate::Error::Disconnected)?
-                        .unbounded_send(ws::v2::ClientMessage::Subscribe(msg))
-                        .expect("Unable to send subscribe message: WS sender loop has dropped its recv channel");
+                    self.send_ws_message(ws::v2::ClientMessage::Subscribe(msg))?;
                 }
                 // else, the handle was already cancelled.
             }
 
             PendingMutation::Unsubscribe { query_set_id } => {
-                let mut inner = self.inner.lock().unwrap();
-                match inner.subscriptions.handle_pending_unsubscribe(query_set_id) {
+                let result = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .subscriptions
+                    .handle_pending_unsubscribe(query_set_id);
+                match result {
                     PendingUnsubscribeResult::DoNothing =>
                     // The subscription was already unsubscribed, so we don't need to send an unsubscribe message.
                     {
@@ -404,13 +427,7 @@ impl<M: SpacetimeModule> DbContextImpl<M> {
                         callback(&self.make_event_ctx(()));
                     }
                     PendingUnsubscribeResult::SendUnsubscribe(m) => {
-                        self.send_chan
-                            .lock()
-                            .unwrap()
-                            .as_mut()
-                            .ok_or(crate::Error::Disconnected)?
-                            .unbounded_send(ws::v2::ClientMessage::Unsubscribe(m))
-                            .expect("Unable to send unsubscribe message: WS sender loop has dropped its recv channel");
+                        self.send_ws_message(ws::v2::ClientMessage::Unsubscribe(m))?;
                     }
                 }
             }
@@ -437,13 +454,7 @@ impl<M: SpacetimeModule> DbContextImpl<M> {
                     request_id,
                     flags,
                 });
-                self.send_chan
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .ok_or(crate::Error::Disconnected)?
-                    .unbounded_send(msg)
-                    .expect("Unable to send reducer call message: WS sender loop has dropped its recv channel");
+                self.send_ws_message(msg)?;
             }
 
             // Invoke a procedure: stash its callback, then send the `CallProcedure` WS message.
@@ -466,13 +477,7 @@ impl<M: SpacetimeModule> DbContextImpl<M> {
                     request_id,
                     flags: ws::v2::CallProcedureFlags::Default,
                 });
-                self.send_chan
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .ok_or(crate::Error::Disconnected)?
-                    .unbounded_send(msg)
-                    .expect("Unable to send procedure call message: WS sender loop has dropped its recv channel");
+                self.send_ws_message(msg)?;
             }
 
             // Disconnect: close the connection.
